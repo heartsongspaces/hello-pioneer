@@ -4,8 +4,232 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pioneer Species</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 1.5rem; }
+    form { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 2rem; }
+    textarea { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; resize: vertical; }
+    button { align-self: flex-end; padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; }
+    .notes { display: flex; flex-direction: column; gap: 1rem; }
+    .note { border: 1px solid #e2e2e2; border-radius: 6px; padding: 0.75rem 1rem; }
+    .note p { margin: 0 0 0.5rem; white-space: pre-wrap; }
+    .note-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+    .note time { font-size: 0.8rem; color: #666; }
+    .share-btn {
+      align-self: auto;
+      padding: 0.2rem 0.65rem;
+      font-size: 0.78rem;
+      cursor: pointer;
+      border: 1px solid #d0d0d0;
+      border-radius: 4px;
+      background: #fff;
+      color: #555;
+      line-height: 1.5;
+    }
+    .share-btn:hover { background: #f5f5f5; border-color: #bbb; }
+    #status { font-size: 0.9rem; color: #555; margin-bottom: 1rem; }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.45);
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.75rem;
+      width: 100%;
+      max-width: 420px;
+      margin: 1rem;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+    }
+    .modal h2 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+    .modal p.modal-sub { margin: 0 0 1.1rem; font-size: 0.85rem; color: #666; }
+    .modal input[type=email] {
+      display: block;
+      width: 100%;
+      padding: 0.55rem 0.65rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      box-sizing: border-box;
+      margin-bottom: 0.85rem;
+    }
+    .modal input[type=email]:focus { outline: 2px solid #111; outline-offset: 1px; }
+    .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+    .modal-actions button { align-self: auto; }
+    #send-btn { background: #111; color: #fff; border: none; border-radius: 5px; }
+    #send-btn:hover:not(:disabled) { background: #333; }
+    #send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    #cancel-btn { background: #fff; border: 1px solid #ccc; border-radius: 5px; color: #333; }
+    #cancel-btn:hover { background: #f5f5f5; }
+    #modal-msg { font-size: 0.85rem; margin: 0.6rem 0 0; min-height: 1.2em; color: #555; }
+    #modal-msg.error { color: #c00; }
+    #modal-msg.success { color: #060; }
+  </style>
 </head>
 <body>
   <h1>hello from Pioneer Species</h1>
+
+  <form id="note-form">
+    <textarea id="note-input" rows="4" placeholder="Write a note…" required></textarea>
+    <button type="submit">Post Note</button>
+  </form>
+
+  <p id="status"></p>
+  <div id="notes" class="notes"></div>
+
+  <!-- Share modal -->
+  <div class="modal-overlay" id="share-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <h2 id="modal-title">Share note via email</h2>
+      <p class="modal-sub">Enter a recipient and we'll send them the note.</p>
+      <input type="email" id="recipient-email" placeholder="recipient@example.com"
+             autocomplete="email" aria-label="Recipient email address">
+      <div class="modal-actions">
+        <button id="cancel-btn" type="button">Cancel</button>
+        <button id="send-btn" type="button">Send</button>
+      </div>
+      <p id="modal-msg" role="status"></p>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const { createClient } = supabase;
+    const db = createClient('__SUPABASE_URL__', '__SUPABASE_ANON_KEY__');
+
+    const notesEl  = document.getElementById('notes');
+    const statusEl = document.getElementById('status');
+    const form     = document.getElementById('note-form');
+    const input    = document.getElementById('note-input');
+
+    // ── Share modal state ──────────────────────────────────────────
+    const modal      = document.getElementById('share-modal');
+    const emailInput = document.getElementById('recipient-email');
+    const sendBtn    = document.getElementById('send-btn');
+    const cancelBtn  = document.getElementById('cancel-btn');
+    const modalMsg   = document.getElementById('modal-msg');
+    let pendingNote  = null;
+
+    function escape(s) {
+      return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function escapeAttr(s) {
+      return escape(s).replace(/"/g,'&quot;');
+    }
+
+    function openShareModal(content, date) {
+      pendingNote = { content, date };
+      modal.classList.add('open');
+      emailInput.value = '';
+      modalMsg.textContent = '';
+      modalMsg.className = '';
+      sendBtn.disabled = false;
+      emailInput.focus();
+    }
+
+    function closeModal() {
+      modal.classList.remove('open');
+      pendingNote = null;
+    }
+
+    cancelBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+    sendBtn.addEventListener('click', async () => {
+      const to = emailInput.value.trim();
+      if (!to) {
+        modalMsg.textContent = 'Please enter a recipient email address.';
+        modalMsg.className = 'error';
+        return;
+      }
+      sendBtn.disabled = true;
+      modalMsg.textContent = 'Sending…';
+      modalMsg.className = '';
+
+      try {
+        const res = await fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to,
+            noteContent: pendingNote.content,
+            noteDate: pendingNote.date,
+          }),
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          modalMsg.textContent = json.error || 'Failed to send. Try again.';
+          modalMsg.className = 'error';
+          sendBtn.disabled = false;
+          return;
+        }
+        modalMsg.textContent = 'Sent! Check the inbox.';
+        modalMsg.className = 'success';
+        setTimeout(closeModal, 1800);
+      } catch {
+        modalMsg.textContent = 'Network error — please try again.';
+        modalMsg.className = 'error';
+        sendBtn.disabled = false;
+      }
+    });
+
+    // Allow Enter key to submit while focused on the email field
+    emailInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') sendBtn.click();
+    });
+
+    // ── Notes ──────────────────────────────────────────────────────
+    async function loadNotes() {
+      statusEl.textContent = 'Loading…';
+      const { data, error } = await db
+        .from('notes')
+        .select('title,content,created_at')
+        .order('created_at', { ascending: false });
+      if (error) { statusEl.textContent = 'Error loading notes.'; console.error(error); return; }
+      statusEl.textContent = '';
+      notesEl.innerHTML = data.length
+        ? data.map(n => {
+            const content = n.content ?? n.title;
+            const date    = new Date(n.created_at).toLocaleString();
+            return `<div class="note">
+  <p>${escape(content)}</p>
+  <div class="note-footer">
+    <time>${escape(date)}</time>
+    <button class="share-btn"
+            data-content="${escapeAttr(content)}"
+            data-date="${escapeAttr(date)}"
+            onclick="openShareModal(this.dataset.content, this.dataset.date)">
+      Share via email
+    </button>
+  </div>
+</div>`;
+          }).join('')
+        : '<p>No notes yet. Be the first!</p>';
+    }
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      const btn = form.querySelector('button');
+      btn.disabled = true;
+      const { error } = await db.from('notes').insert({ title: text.slice(0, 80), content: text });
+      btn.disabled = false;
+      if (error) { alert('Error: ' + error.message); return; }
+      input.value = '';
+      loadNotes();
+    });
+
+    loadNotes();
+  </script>
 </body>
 </html>
